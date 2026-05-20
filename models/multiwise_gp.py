@@ -74,7 +74,7 @@ def _ensure_psd_with_jitter(
     matrix: Tensor,
     scale: Union[float, Tensor] = 1.0,
     jitter: float = 1e-8,
-    max_tries: int = 3,
+    max_tries: int = 6,
 ) -> Tensor:
     scaled_matrix = matrix / scale
     new_jitter = 0
