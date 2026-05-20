@@ -188,7 +188,16 @@ def run_pbo(opt: MultiBOConfig_FLUX_promptset, target_img=None, tar_seed=None):
         convert_t = "no-convert-pair"
     else:
         convert_t = "T-to-pair" if opt.convert_to_pair else "no-convert-pair"
-    opt.output_path = os.path.join(opt.output_path,opt.edit_type,f"{opt.feat_blocks}-blk",f"res-{opt.res_blk}--{ss}",f"T-edit-{opt.t_edit}_Delta-{opt.delta}-{comp}")
+    # FLUX configs encode every transformer block into the folder name (~370
+    # chars / single component) and trip ENAMETOOLONG on most filesystems
+    # (limit 255). Hash overlong components but keep the readable prefix so
+    # different attn_blk configs still map to different directories.
+    res_ss = f"res-{opt.res_blk}--{ss}"
+    if len(res_ss) > 200:
+        import hashlib
+        digest = hashlib.md5(res_ss.encode()).hexdigest()[:12]
+        res_ss = f"res-attn-{digest}"
+    opt.output_path = os.path.join(opt.output_path,opt.edit_type,f"{opt.feat_blocks}-blk",res_ss,f"T-edit-{opt.t_edit}_Delta-{opt.delta}-{comp}")
     os.makedirs(opt.output_path,exist_ok=True)
     orig_path = os.path.join(opt.output_path,"image_orig",f"image_orig.png")
     
