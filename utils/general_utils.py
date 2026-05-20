@@ -78,7 +78,7 @@ def save_results(data, models, best_vals, n_trial, seed, opt):
     for algo in opt.acf_algos:
         acf_path = os.path.join(opt.output_path,algo)
         os.makedirs(acf_path, exist_ok=True)
-        if opt.obj_name == "sdxl":
+        if opt.obj_name in opt.image_models:  # was: == "sdxl" — flux/sd3/pixart were silently skipped
             for i in [n_trial]: #range(opt.num_trials):
                 for j, img in enumerate(best_vals[algo][i]):
                     img.save(os.path.join(acf_path,f"best_image_trial-{i}_batch-{j}.png"))
