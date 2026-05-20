@@ -579,12 +579,19 @@ class AttentionControl(abc.ABC):
     def __call__(self, attn, val, query, key, is_cross: bool, place_in_unet: str, attn_uncond: bool):
         recomp = False
         if self.cur_att_layer >= self.num_uncond_att_layers:
-            h = attn.shape[0]
-            # attn[2,3] - im0_cond, im1_cond
-            attn[h // 2 :], val[h // 2 :], query[h // 2 :], key[h // 2 :], recomp = self.forward(attn[h // 2 :], val[h // 2 :], query[h // 2 :], key[h // 2 :], is_cross, place_in_unet)
-            if attn_uncond:
-                # attn[0,1] - im0_uncond, im1_uncond
-                attn[: h // 2], val[: h // 2], query[: h // 2], key[: h // 2], recomp = self.forward(attn[: h // 2], val[: h // 2], query[: h // 2], key[: h // 2], is_cross, place_in_unet)
+            if attn.dim() == 4:
+                # FLUX MM-DiT: tensor is [batch, heads, seq, seq] (4D); batch=2
+                # holds (source, target). No CFG split (schnell, guidance_scale=0),
+                # so pass the whole pair to forward — its 4D-aware branch edits
+                # attn[1:] in place using attn[0] as source.
+                attn, val, query, key, recomp = self.forward(attn, val, query, key, is_cross, place_in_unet)
+            else:
+                h = attn.shape[0]
+                # attn[2,3] - im0_cond, im1_cond
+                attn[h // 2 :], val[h // 2 :], query[h // 2 :], key[h // 2 :], recomp = self.forward(attn[h // 2 :], val[h // 2 :], query[h // 2 :], key[h // 2 :], is_cross, place_in_unet)
+                if attn_uncond:
+                    # attn[0,1] - im0_uncond, im1_uncond
+                    attn[: h // 2], val[: h // 2], query[: h // 2], key[: h // 2], recomp = self.forward(attn[: h // 2], val[: h // 2], query[: h // 2], key[: h // 2], is_cross, place_in_unet)
         self.cur_att_layer += 1
         if self.cur_att_layer == self.num_att_layers + self.num_uncond_att_layers:
             self.cur_att_layer = 0
@@ -737,12 +744,17 @@ class FeatandAttnControlEdit(AttentionStore, abc.ABC):
         # attn,q,k,v [i0, i1] [2*num_heads, res*res, T] -- [0,1] or [2,3]
         recomp = False
         if is_cross or (self.edit_start_step + self.delta > self.cur_step >= self.edit_start_step):
-            h = attn.shape[0] // (self.batch_size)  #num_heads
-            attn = attn.reshape(self.batch_size, h, *attn.shape[1:]) # [2, num_heads, res*res, T]
-            val = val.reshape(self.batch_size, h, *val.shape[1:])
-            query = query.reshape(self.batch_size, h, *query.shape[1:])
-            key = key.reshape(self.batch_size, h, *key.shape[1:])
-            
+            # FLUX MM-DiT tensors arrive as [batch, heads, ...] (4D) — already
+            # in the per-image layout this function operates on. SDXL tensors
+            # arrive flat as [batch*heads, ...] (3D) and need the reshape.
+            is_4d = (attn.dim() == 4)
+            if not is_4d:
+                h = attn.shape[0] // (self.batch_size)  #num_heads
+                attn = attn.reshape(self.batch_size, h, *attn.shape[1:]) # [2, num_heads, res*res, T]
+                val = val.reshape(self.batch_size, h, *val.shape[1:])
+                query = query.reshape(self.batch_size, h, *query.shape[1:])
+                key = key.reshape(self.batch_size, h, *key.shape[1:])
+
             val_src = val[0]
             query_src = query[0]
             key_src = key[0]
@@ -774,10 +786,11 @@ class FeatandAttnControlEdit(AttentionStore, abc.ABC):
                 if self.should_edit_feat(place_in_unet,"s-value"):
                     val[1:] = self.edit_q_k_v(val_src, place_in_unet, feat_type="value", is_cross=False)
                     recomp = True
-            attn = attn.reshape(self.batch_size * h, *attn.shape[2:])
-            val = val.reshape(self.batch_size * h, *val.shape[2:])
-            query = query.reshape(self.batch_size * h, *query.shape[2:])
-            key = key.reshape(self.batch_size * h, *key.shape[2:])
+            if not is_4d:
+                attn = attn.reshape(self.batch_size * h, *attn.shape[2:])
+                val = val.reshape(self.batch_size * h, *val.shape[2:])
+                query = query.reshape(self.batch_size * h, *query.shape[2:])
+                key = key.reshape(self.batch_size * h, *key.shape[2:])
         # if self.cur_step > (self.edit_start_step + self.delta):
         #     if not is_cross:
                 # if self.should_edit_feat(place_in_unet,"s-value"):
