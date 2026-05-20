@@ -282,7 +282,7 @@ def record_choice(images, title=None,MAX_COLS=4, json_input=".json", orig_path=N
 
     return result["choice"]
 
-def non_human_choice(images, prompt, scoring_metric="pickscore", opt=None, device="cuda"):
+def non_human_choice(images, prompt, scoring_metric="pickscore", opt=None, target=None, device="cuda"):
     """
     Evaluates a list of images against a prompt using a specific metric 
     and returns the index of the highest-scoring image.
@@ -300,6 +300,9 @@ def non_human_choice(images, prompt, scoring_metric="pickscore", opt=None, devic
     elif scoring_metric == "picscore":
         from models.rewards import pickscore_utils
         model = pickscore_utils.Selector(device)
+    elif scoring_metric == "hpsv3":
+        from models.rewards import hpsv3_utils
+        model = hpsv3_utils.Selector(device)
     elif scoring_metric == "imagereward":
         import ImageReward as RM
         model = RM.load("ImageReward-v1.0")

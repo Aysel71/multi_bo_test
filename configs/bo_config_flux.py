@@ -8,7 +8,7 @@ class MultiBOConfig_FLUX:
     """Configuration for Multiwise/Pairwise Bayesian Optimization experiments."""
 
     # Experiment setup
-    num_trials: int = 2
+    num_trials: int = 1
     num_batches: int = 20
 
     # Problem setup
@@ -100,7 +100,7 @@ class MultiBOConfig_FLUX:
     image_models: List[str] = field(default_factory=lambda: ["sdxl","pixart","flux","sd3"])
     prompts: str = ""
     title: str = ""
-    num_inference_steps: int = 50
+    num_inference_steps: int = 4
     img_seed : int = 864
     t_edit: float = 0.0
     delta: float = 0.2
