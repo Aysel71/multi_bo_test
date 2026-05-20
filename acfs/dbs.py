@@ -56,7 +56,7 @@ class DynamicBalancedSubspace:
             # Energy-based
             total_variance = torch.sum(evals)
             if total_variance < 1e-9: # Handle flat landscapes or uninitialized models
-                return evecs[:, :2], 2        
+                return evecs[:, :2], evals[:2], 2  # was returning only 2 values; callers unpack 3
             cumulative_energy = torch.cumsum(evals, dim=0) / total_variance
             # print("cum-energy---",cumulative_energy)
             d_indices = torch.where(cumulative_energy >= self.energy_threshold)[0]
