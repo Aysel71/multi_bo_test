@@ -19,8 +19,10 @@ def utility(X, opt, device=None, maximize=True):
     # y is user score for a choice of X: attention edit parameters,
     
     results = []
+    if isinstance(device, str):
+        device = torch.device(device)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
-    
+
     seed = opt.img_seed
     prompts=opt.prompts
     t_edit = opt.t_edit
@@ -167,6 +169,8 @@ def utility(X, opt, device=None, maximize=True):
     # rate_image(image)
 
 def unedited_generation(prompt, seed, num_inference_steps, device):
+    if isinstance(device, str):
+        device = torch.device(device)
     dtype = torch.bfloat16 if device.type == "cuda" else torch.float32
     pipeline = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-schnell", torch_dtype=dtype).to(device)
 
