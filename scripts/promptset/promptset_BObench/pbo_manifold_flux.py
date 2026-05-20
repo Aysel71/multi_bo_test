@@ -133,14 +133,42 @@ def start(opt: MultiBOConfig_FLUX_promptset):
             image, ref_paths = run_pbo(opt, target_img, tar_seed)
             # image is in the order of acf_algos x trials
             for i in range(len(image)):
-                save_path = os.path.join(op_path, f"{sanitize_filename(prompt)}_{counter_id:06d}.png") 
-                save_ref_path = os.path.join(ref_path, f"{sanitize_filename(prompt)}_{counter_id:06d}.png") 
-                save_tar_path = os.path.join(tar_path, f"{sanitize_filename(prompt)}_{counter_id:06d}.png") 
+                save_path = os.path.join(op_path, f"{sanitize_filename(prompt)}_{counter_id:06d}.png")
+                save_ref_path = os.path.join(ref_path, f"{sanitize_filename(prompt)}_{counter_id:06d}.png")
+                save_tar_path = os.path.join(tar_path, f"{sanitize_filename(prompt)}_{counter_id:06d}.png")
                 image[i].save(save_path)
                 r_img = Image.open(ref_paths[i])
                 r_img.save(save_ref_path)
                 target_img.save(save_tar_path)
                 prompt_total.append(opt.prompts)
+
+                # Score the final BO winner (and the unedited reference) so the
+                # aggregator can read final metrics directly. HPSv3 model is
+                # already in memory from the BO selection loop — one extra call.
+                final_hpsv3 = float("nan")
+                ref_hpsv3 = float("nan")
+                if opt.non_human_score and opt.score_metric == "hpsv3":
+                    try:
+                        from models.rewards import hpsv3_utils
+                        _scorer = hpsv3_utils.Selector(device="cuda")
+                        final_hpsv3 = float(_scorer.score([image[i]], opt.prompts)[0])
+                        ref_hpsv3   = float(_scorer.score([r_img],     opt.prompts)[0])
+                    except Exception as e:
+                        print(f"final HPSv3 scoring failed: {e}")
+                scores_path = os.path.join(os.path.dirname(op_path), "scores.jsonl")
+                with open(scores_path, "a") as _sf:
+                    _sf.write(json.dumps({
+                        "id":          prompt_idx.get("id", ""),
+                        "prompt":      opt.prompts,
+                        "category":    category,
+                        "best_path":   save_path,
+                        "ref_path":    save_ref_path,
+                        "tar_path":    save_tar_path,
+                        "hpsv3_bo":    final_hpsv3,
+                        "hpsv3_ref":   ref_hpsv3,
+                        "delta_hpsv3": final_hpsv3 - ref_hpsv3,
+                    }) + "\n")
+                print(f"  HPSv3: ref={ref_hpsv3:.3f}  bo={final_hpsv3:.3f}  Δ={final_hpsv3-ref_hpsv3:+.3f}")
                 print(" ")
                 counter_id += 1
         with open(prompt_tot_path, "w") as f:
