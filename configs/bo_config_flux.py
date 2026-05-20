@@ -9,11 +9,11 @@ class MultiBOConfig_FLUX:
 
     # Experiment setup
     num_trials: int = 1
-    num_batches: int = 20
+    num_batches: int = 10              # was 20; halves BO iterations, biggest speed knob
 
     # Problem setup
     dim: int = 24 #composite = 10, affine = 14, geo(a) = 48 geo(b) = 24 (grid=3) = 38 (grid=4)
-    num_initial_samples: int = 20   # number of datapoints
+    num_initial_samples: int = 10      # was 20; halves Sobol init
     m: int = 50  # number of comparisons
     T: int = 3 # num. of choices in choice set
     lim: List[int] = field(default_factory=lambda: [-1,1])
@@ -27,8 +27,8 @@ class MultiBOConfig_FLUX:
     json_input: str = '.json'
 
     # Acquisition parameters
-    num_restarts: int = 50
-    raw_samples: int = 4096
+    num_restarts: int = 10             # was 50; BoTorch typical 10-20, 50 was overkill
+    raw_samples: int = 1024            # was 4096; BoTorch typical 1024-2048
     q: int = 2       # number of points per query
     q_comp: int = 1  # number of comparisons per query
     acf_algos: List[str] = field(
