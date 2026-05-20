@@ -151,8 +151,10 @@ def start(opt: MultiBOConfig_FLUX_promptset):
                     try:
                         from models.rewards import hpsv3_utils
                         _scorer = hpsv3_utils.Selector(device="cuda")
-                        final_hpsv3 = float(_scorer.score([image[i]], opt.prompts)[0])
-                        ref_hpsv3   = float(_scorer.score([r_img],     opt.prompts)[0])
+                        # score the persisted PNGs directly (1:1 with method A,
+                        # which also scores HPSv3 from saved file paths)
+                        final_hpsv3 = float(_scorer.score([save_path],     opt.prompts)[0])
+                        ref_hpsv3   = float(_scorer.score([save_ref_path], opt.prompts)[0])
                     except Exception as e:
                         print(f"final HPSv3 scoring failed: {e}")
                 scores_path = os.path.join(os.path.dirname(op_path), "scores.jsonl")
