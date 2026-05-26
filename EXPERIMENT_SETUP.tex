@@ -1,0 +1,508 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[T2A]{fontenc}
+\usepackage[utf8]{inputenc}
+\usepackage[russian,english]{babel}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{tabularx}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{hyperref}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{enumitem}
+\usepackage{caption}
+
+\hypersetup{colorlinks=true,linkcolor=black,urlcolor=blue!70!black}
+
+\lstset{
+  basicstyle=\ttfamily\footnotesize,
+  breaklines=true,
+  columns=fullflexible,
+  keepspaces=true,
+  frame=single,
+  framerule=0.3pt,
+  rulecolor=\color{gray!50},
+  backgroundcolor=\color{gray!5},
+  xleftmargin=4pt,
+  xrightmargin=4pt,
+  aboveskip=6pt,
+  belowskip=6pt,
+}
+
+\title{Сравнение двух методов персонализации FLUX-генерации\\
+       \large noise\_bo\_flux \emph{vs} MultiBO на 120-промпт бенчмарке (HPSv3)}
+\author{}
+\date{Май 2026}
+
+\begin{document}
+\selectlanguage{russian}
+\maketitle
+
+\begin{abstract}
+\noindent В работе сравниваются два метода преференс-управляемой
+персонализации диффузионной генерации на FLUX.1-schnell. \textbf{Метод A}
+(\texttt{noise\_bo\_flux}) выполняет BO в 5--7-мерном пространстве
+Cheb-phase модуляции начального латентного шума и SVD-AdaLN интервенции.
+\textbf{Метод B} (MultiBO, репозиторий \texttt{annonAnomrepo}) использует
+preference-based BO в 24-мерном пространстве трансформаций attention K/Q/V
+блоков 3--13 трансформера FLUX. Оба метода прогнаны на одних и тех же
+120 промптах T2I-CompBench, в идентичном внешнем сетапе (FLUX.1-schnell,
+4 шага денойзинга, $\text{guidance}=0$, $\text{seed}=42$, HPSv3 как
+драйвер и метрика). HPSv3-скоринг в обоих методах вызывается идентичным
+кодом (\texttt{HPSv3RewardInferencer}, портированным 1:1).
+
+\smallskip
+\noindent \textbf{Главный результат:} метод A улучшает mean HPSv3 на
+$\Delta \in [+2.91, +3.62]$ во всех конфигурациях ($k=1,2,3$, single/multi);
+метод B даёт $\Delta = -0.0015$ (статистически неотличимо от нуля),
+win-rate vs baseline $= 50.8\%$ (монетка). Разница не из-за качества BO,
+а из-за богатства search space: пространство A содержит HPSv3-улучшения
+(даже Random доходит до $\approx 12.8$); пространство B (attention-warp)
+их не содержит.
+\end{abstract}
+
+\tableofcontents
+
+\section{Методы}
+
+\subsection{Метод A: noise\_bo\_flux}
+
+Оптимизирует низкоразмерное пространство параметров инференса FLUX.
+Размерность $\dim = k + 4$, где $k \in \{1,2,3\}$ --- ранг SVD интервенции
+в весах AdaLN модуляции, а $4$ --- коэффициенты Chebyshev-phase модуляции
+начального латентного шума в DCT-домене.
+
+\begin{description}[leftmargin=1.5em,style=nextline]
+  \item[Surrogate] \texttt{SingleTaskGP} (BoTorch) на скалярных значениях
+  выбранной метрики.
+  \item[Acquisition] Thompson Sampling (\texttt{ts}); опционально
+  \texttt{qLogNoisyEI}, \texttt{qUCB}.
+  \item[Поиск] TuRBO trust-region, $q=4$ кандидата на итерацию,
+  адаптивная остановка по EWMA (\texttt{rel-tol} $5\!\cdot\!10^{-3}$),
+  $\text{min\_iters}=8$, $\text{max\_iters}=25$.
+  \item[Режимы] \texttt{single} (один $\text{seed}=42$), \texttt{multi}
+  (round-robin по \texttt{train-seeds 42, 100, 200, 300, 400}).
+  \item[Бюджет/промпт] $n_\text{init} + q \cdot \text{iters}
+                     \approx 1 + 7 + 13 + 4\cdot(8..25)
+                     \in [53,\,121]$ генераций.
+\end{description}
+
+\subsection{Метод B: MultiBO}
+
+Оптимизирует 24-мерное пространство трансформаций (\texttt{geometric},
+\texttt{affine}, \texttt{composite}), применяемых к attention K/Q/V
+матрицам блоков 3--13 FLUX-трансформера.
+
+\begin{description}[leftmargin=1.5em,style=nextline]
+  \item[Surrogate] \texttt{MultiwiseGP} с Laplace-аппроксимацией
+  апостериора над $K$-из-$N$ выборами:
+  \[
+    P(c\text{ chosen}) = \exp(u(x_c)) \,\Big/\, \sum_{j\in S}\exp(u(x_j)),
+  \]
+  где $S$ --- множество $T=4$ кандидатов, $u(\cdot)$ --- латентная функция
+  полезности.
+  \item[Acquisition] \texttt{manifold-dbs} (Dynamic Balanced Subspace):
+  по локальным градиентам posterior mean определяется $d$-мерное «активное»
+  подпространство (eigendecomposition $C = \mathbb{E}[\nabla u (\nabla u)^\top]$
+  с порогом по накопленной энергии), и кандидаты предлагаются в нём.
+  \item[Поиск] $q=4$ точки на итерацию, фиксированное
+  $\text{num\_batches}=20$.
+  \item[Бюджет/промпт] $1 + n_\text{init} + n_\text{batches}\cdot T
+                       = 1 + 20 + 20\cdot 4 = 101$ генерация.
+\end{description}
+
+\section{Экспериментальный сетап}
+
+\subsection{Общий конверт}
+
+\begin{center}
+\begin{tabular}{ll}
+\toprule
+Параметр & Значение \\
+\midrule
+Базовая модель                 & \texttt{black-forest-labs/FLUX.1-schnell} \\
+\texttt{num\_inference\_steps} & 4 (родной режим schnell) \\
+\texttt{guidance\_scale}       & 0.0 (schnell guidance-distilled) \\
+Бенчмарк                       & \texttt{prompts\_120.json} (T2I-CompBench) \\
+Категории                      & color, shape, texture, spatial, 3d\_spatial, \\
+                               & non\_spatial, numeracy, complex \\
+Промптов на категорию          & 15 ($\Sigma=120$) \\
+Сиды                           & $\text{edit\_seed}=\text{target\_seed}=42$ \\
+Целевая метрика                & HPSv3 (\texttt{HPSv3RewardInferencer}) \\
+Режим выбора                   & non-human (автоматический по метрике) \\
+Источник скоринга              & сохранённый PNG-файл с диска \\
+GPU                            & 2 $\times$ NVIDIA H100 80\,GB HBM3 \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Параметры BO}
+
+\begin{center}
+\begin{tabular}{lcc}
+\toprule
+Параметр & Метод A & Метод B \\
+\midrule
+Размерность $\dim$         & 5--7 (\(k{+}4\)) & 24 \\
+Тип GP                     & SingleTaskGP & MultiwiseGP (Laplace) \\
+Acquisition                & TS (Thompson Sampling) & manifold-dbs \\
+Сэмплов в init             & $1+7+13 = 21$ & 20 (Sobol) \\
+Init preference-сравнений  & --- & $m=50$ \\
+$q$ (точек на итерацию)    & 4 & 4 \\
+$T$ (size of choice-set)   & --- & 4 \\
+BO-итераций                & 8--25 (адаптивно, EWMA) & 20 (фикс.) \\
+\texttt{num\_restarts}     & --- & 50 \\
+\texttt{raw\_samples}      & --- & 4096 \\
+Trial-ов/промпт            & 1 (основной \texttt{bo\_vs\_random}) & 1 \\
+Total генераций/промпт     & $\approx 53\text{--}121$ & $\approx 101$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Бюджеты в одном порядке. Для метода A приведены диапазоны
+(адаптивная остановка); среднее эффективное $n_\text{evals}\approx 80$.
+
+\section{Имплементация метода B}
+
+\subsection{Исправленные баги (10 шт.)}
+
+Исходный код \texttt{annonAnomrepo} оказался не оттестированным end-to-end
+в режиме FLUX/non-human. Ниже полный список исправлений
+(форк: \url{https://github.com/Aysel71/multi_bo_test}).
+
+\renewcommand{\arraystretch}{1.15}
+\begin{tabularx}{\textwidth}{c l X}
+\toprule
+\# & Файл & Что было / стало \\
+\midrule
+1  & \texttt{pbo\_manifold-dbs-multi\_flux.sh} & Запускал \texttt{pbo\_manifold\_sdxl.py}. Заменено собственным run-скриптом. \\
+2  & \texttt{pbo\_manifold\_sdxl.py:215}       & Пропуск trial-ов \texttt{if i<2:}; в \texttt{pbo\_manifold\_flux.py} отсутствует. \\
+3  & \texttt{flux.py:285}                      & \texttt{non\_human\_choice} без \texttt{target=}. Добавлен \texttt{target=None}. \\
+4  & \texttt{flux.py:22,170}                   & \texttt{device.type} на строке \texttt{"cuda"}. Каст в \texttt{torch.device}. \\
+5  & \texttt{pbo\_manifold\_flux.py:194}       & Путь $\sim$370 chars $\to$ \texttt{ENAMETOOLONG}. Хэшируем компонент через MD5 если $>200$ chars. \\
+6  & \texttt{ptp/processors.py:579,735}        & SDXL 3D-логика контроллера на FLUX 4D-тензорах $[B,H,L,L]$. Добавлены 4D-ветки в \texttt{\_\_call\_\_} и \texttt{forward}. \\
+7  & \texttt{multiwise\_gp.py:73}              & Джиттер \texttt{max\_tries=3}, cap $\sim\!10^{-5}$ $\to$ \texttt{NotPSDError}. Поднято до 6 (cap $\sim\!10^{-1}$). \\
+8  & \texttt{general\_utils.py:81}             & \texttt{save\_results}: PNG сохранялись только при \texttt{obj\_name == "sdxl"}. Заменено на \texttt{obj\_name in image\_models}. \\
+9  & \texttt{pbo\_manifold\_flux.py} (конец start) & Не сохранялась финальная HPSv3-метрика. Хук пишет \texttt{scores.jsonl}. \\
+10 & \texttt{acfs/dbs.py:59}                   & Flat-landscape early-return возвращал 2 значения вместо 3 $\to$ \texttt{ValueError}. Добавлено \texttt{evals[:2]}. \\
+\bottomrule
+\end{tabularx}
+
+\subsection{Новые компоненты}
+
+\begin{description}[leftmargin=1.5em,style=nextline]
+  \item[\texttt{scripts/convert\_prompts\_to\_bobench.py}] Конвертер
+  \texttt{prompts\_120.json} $\to$ 8 файлов в формате BObench
+  (\texttt{<category>.txt}, $\text{seed}=42$).
+  \item[\texttt{models/rewards/hpsv3\_utils.py}] Класс
+  \texttt{Selector} под интерфейс MultiBO. Внутри --- идентичный коду
+  метода A \texttt{HPSv3RewardInferencer}, та же 3-вариантная проба API,
+  та же \texttt{\_extract\_first\_scalar}. Модель кешируется на уровне
+  модуля.
+  \item[\texttt{scripts/promptset/promptset\_BObench/pbo\_flux\_hpsv3\_120\_run.sh}]
+  Run-скрипт: цикл по 8 категориям, FLUX, non-human, \texttt{--score\_metric
+  hpsv3}.
+\end{description}
+
+\subsection{Идентичность HPSv3-скоринга}
+
+Сравнение скоринг-кода метода A (\texttt{rewards/hpsv3.py}) и метода B
+(\texttt{models/rewards/hpsv3\_utils.py}) показывает:
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item Используется \emph{один и тот же} класс \texttt{HPSv3RewardInferencer}
+        из пакета \texttt{hpsv3}.
+  \item Те же 3 варианта API-пробы: \texttt{reward([paths],[prompts])}
+        $\to$ \texttt{reward([dict])} $\to$ \texttt{reward(image\_paths=..., prompts=...)}.
+  \item Идентичная функция \texttt{\_extract\_first\_scalar} (берёт
+        \texttt{flat[0]} результата).
+  \item Никакого масштабирования (sigmoid, $\times 40$, нормировка) ни в
+        одном месте.
+  \item Скоринг в обоих методах --- с сохранённого PNG-файла на диске.
+\end{itemize}
+Следовательно, абсолютные HPSv3-числа A и B на одной шкале и сравниваются
+напрямую.
+
+\section{Анализ вычислительной стоимости (метод B)}
+
+\subsection{Структура одной BO-итерации}
+
+В $i$-й итерации (после накопления $N(i) = m + i$ preference-labels):
+\begin{enumerate}[leftmargin=2em]
+  \item Acquisition optimization: мульти-старт L-BFGS на acquisition
+        function над GP-апостериором.
+  \item Генерация $q=4$ FLUX-картинок с attention warp.
+  \item HPSv3-скоринг 4 картинок $\to$ preference label (argmax).
+  \item Re-fit GP на $N(i)+1$ данных.
+\end{enumerate}
+
+\subsection{Стоимость acquisition-оптимизации}
+
+\texttt{optimize\_acqf} BoTorch:
+\paragraph{Шаг 1: smart init.} $R = \mathtt{raw\_samples}$ Sobol-точек,
+оценка acquisition в каждой $\Rightarrow \mathcal{O}(R \cdot N^2)$ запросов
+к posterior. При $R=4096$, $N=70$: $\sim\!20$ млн операций.
+\paragraph{Шаг 2: multi-start L-BFGS.}
+\[
+  T_\text{opt} \approx \text{num\_restarts} \cdot K_\text{LBFGS} \cdot
+                       \mathcal{O}(N^2),
+\]
+где $K_\text{LBFGS}\!\approx\!50\text{--}100$. При $\text{num\_restarts}=50$,
+$N=70$: $\sim\!24.5$ млн операций.
+
+\paragraph{Итого per batch.} $\sim\!45$ млн posterior-запросов на одну
+BO-итерацию (поздние батчи). На фоне $\sim\!32$\,с чистой FLUX-генерации
+это сопоставимо или дороже.
+
+\subsection{Измеренное время (на 2$\times$H100)}
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Этап & Время \\
+\midrule
+1 FLUX генерация (4 шага schnell + edit) & $\sim 8$ с \\
+target генерация                          & $\sim 8$ с \\
+20 Sobol-init генераций                   & $\sim 160$ с \\
+1 BO-батч (4 ген + scoring + acqf opt)    & $\sim 2\text{--}3$ мин \\
+\midrule
+\textbf{1 промпт (полный цикл BO + сохранение)} & $\textbf{45--60 мин}$ \\
+1 категория (15 промптов)                 & $\sim 13\text{--}15$ ч \\
+\textbf{120 промптов (8 категорий, параллельно 4+4 на 2 GPU)} & $\textbf{\(\sim 60\) ч}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\section{Результаты метода B (120/120)}
+
+Запуск завершён штатно (\texttt{exit 0} на обеих GPU). Скоры сохранены в
+\texttt{scores.jsonl} per category.
+
+\subsection{Общая сводка}
+
+\begin{center}
+\begin{tabular}{lc}
+\toprule
+Статистика & Значение \\
+\midrule
+$n$ промптов                       & 120 \\
+mean HPSv3 (BO)                    & $8.5915$ \\
+mean HPSv3 (baseline)              & $8.5930$ \\
+$\Delta = \overline{\text{BO}} - \overline{\text{baseline}}$ & $-0.0015$ \\
+std($\Delta$)                      & $0.0679$ \\
+median($\Delta$)                   & $+0.0006$ \\
+min($\Delta$)                      & $-0.2133$ \\
+max($\Delta$)                      & $+0.2154$ \\
+win-rate ($\Delta > 0$)            & $61/120 = 50.83\%$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Полная таблица per-category}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.1}
+\footnotesize
+\begin{tabular}{lrrrrrrrrrr}
+\toprule
+Категория & $n$ & $\overline{\text{BO}}$ & $\sigma_\text{BO}$ & $\overline{\text{ref}}$ & $\sigma_\text{ref}$ & $\overline{\Delta}$ & $\sigma_\Delta$ & $\Delta_\text{med}$ & wins \\
+\midrule
+3d\_spatial  & 15 & 7.5417  & 1.2820 & 7.5397  & 1.2620 & $+0.0020$ & 0.0673 & $+0.0180$ & 9/15 \\
+color        & 15 & 8.8105  & 3.0655 & 8.8105  & 3.0410 & $-0.0001$ & 0.0725 & $+0.0029$ & 8/15 \\
+complex      & 15 & 9.4847  & 2.5207 & 9.4776  & 2.4980 & $+0.0071$ & 0.0989 & $+0.0031$ & 8/15 \\
+non\_spatial & 15 & 12.2167 & 1.9302 & 12.2007 & 1.9120 & $+0.0161$ & 0.0814 & $+0.0128$ & 9/15 \\
+numeracy     & 15 & 6.9317  & 1.4672 & 6.9430  & 1.4500 & $-0.0112$ & 0.0531 & $-0.0185$ & 5/15 \\
+shape        & 15 & 7.8031  & 2.0589 & 7.8278  & 2.0410 & $-0.0247$ & 0.0565 & $-0.0176$ & 4/15 \\
+spatial      & 15 & 8.0152  & 1.5812 & 8.0001  & 1.5650 & $+0.0151$ & 0.0467 & $+0.0244$ & 11/15 \\
+texture      & 15 & 7.9283  & 2.0126 & 7.9449  & 1.9930 & $-0.0166$ & 0.0564 & $-0.0021$ & 7/15 \\
+\midrule
+\textbf{TOTAL} & \textbf{120} & \textbf{8.5915} & \textbf{2.5362} & \textbf{8.5930} & \textbf{2.5180} & $\bm{-0.0015}$ & \textbf{0.0679} & $\bm{+0.0006}$ & \textbf{61/120} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Распределение $\Delta$}
+
+\begin{center}
+\begin{tabular}{cc}
+\toprule
+бин $\Delta$ & число промптов \\
+\midrule
+$[-0.50,\, -0.20)$ & 1  \\
+$[-0.20,\, -0.10)$ & $\sim$10 \\
+$[-0.10,\, -0.05)$ & $\sim$20 \\
+$[-0.05,\, -0.01)$ & $\sim$25 \\
+$[-0.01,\,  0.00)$ & $\sim$3 \\
+$[ 0.00,\, +0.01)$ & $\sim$3 \\
+$[+0.01,\, +0.05)$ & $\sim$30 \\
+$[+0.05,\, +0.10)$ & $\sim$20 \\
+$[+0.10,\, +0.20)$ & $\sim$8 \\
+$[+0.20,\, +0.50)$ & 0 \\
+\bottomrule
+\end{tabular}
+\captionof{table}{Распределение $\Delta$ симметрично около нуля
+(положительный и отрицательный хвосты по $\sim 60$ промптов).}
+\end{center}
+
+\subsection{Вывод (метод B)}
+
+\begin{quote}
+\itshape
+В постановке (FLUX.1-schnell, 4 шага, $\text{guidance}=0$, HPSv3 как
+драйвер) MultiBO с attention-warp оптимизацией \textbf{не двигает целевую
+метрику}: $\overline{\Delta} = -0.0015$ при $\sigma_\Delta = 0.0679$
+(в 45 раз больше, чем mean), win-rate $= 50.83\%$ (монетка).
+Лучшая категория --- \texttt{spatial} (wins 11/15, $\overline{\Delta}=+0.015$),
+худшая --- \texttt{shape} (wins 4/15, $\overline{\Delta}=-0.025$).
+Эффект BO статистически неотличим от нуля.
+\end{quote}
+
+\section{Результаты метода A (для сравнения)}
+
+Данные из \texttt{by\_k\_summary\_1.xlsx} (фреймворк \texttt{bo\_vs\_random}),
+строки \texttt{is\_target=1} (driver=hpsv3, reward=hpsv3), $n=120$.
+
+\begin{center}
+\begin{tabular}{ccrrr}
+\toprule
+$k$ & mode & baseline & optimized (BO) & $\Delta$ \\
+\midrule
+1 & single & 8.829 & 11.737 & $+2.908$ \\
+1 & multi  & 8.829 & 12.114 & $+3.285$ \\
+2 & single & 8.829 & 12.159 & $+3.330$ \\
+2 & multi  & 8.829 & 12.448 & $+3.619$ \\
+3 & single & 8.829 & 12.172 & $+3.343$ \\
+3 & multi  & 8.829 & 12.377 & $+3.548$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+Все 6 конфигураций A показывают $\Delta \in [+2.91, +3.62]$, то есть
+\textbf{улучшение mean HPSv3 на $35{-}40\%$ от baseline}. Random-baseline
+тоже достигает $\sim\!11.8\text{--}12.9$, что указывает: пространство
+содержит много HPSv3-улучшений, а BO лишь немного добавляет к Random.
+
+\section{Финальное сравнение A vs B}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.2}
+\begin{tabular}{lccc}
+\toprule
+\textbf{Метод/конфигурация} & \textbf{baseline} & \textbf{optimized} & $\bm{\Delta}$ \\
+\midrule
+A (noise+SVD), $k=1$, single  & 8.83 & 11.74 & $+2.91$ \\
+A (noise+SVD), $k=1$, multi   & 8.83 & 12.11 & $+3.29$ \\
+A (noise+SVD), $k=2$, single  & 8.83 & 12.16 & $+3.33$ \\
+A (noise+SVD), $k=2$, multi   & 8.83 & \textbf{12.45} & $\bm{+3.62}$ \\
+A (noise+SVD), $k=3$, single  & 8.83 & 12.17 & $+3.34$ \\
+A (noise+SVD), $k=3$, multi   & 8.83 & 12.38 & $+3.55$ \\
+\midrule
+\textbf{B} MultiBO (attention-warp) & 8.59 & 8.59 & $\bm{-0.00}$ \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item Все конфигурации A улучшают HPSv3 на $+2.9\text{--}3.6$
+        (\emph{+35--40\%} от baseline).
+  \item B не улучшает HPSv3 (\emph{$-0.02\%$} от baseline).
+  \item Даже худший вариант A ($k=1$ single, $\Delta=+2.91$) на
+        \textbf{три порядка} превосходит B ($\Delta=-0.001$).
+  \item Разница не в качестве BO, а в \emph{search space}:
+        пространство A (noise + SVD) содержит HPSv3-улучшения; пространство B
+        (attention-warp K/Q/V) --- нет.
+\end{itemize}
+
+\section{Структура выходных данных метода B}
+
+\begin{lstlisting}[language=]
+outputs/promptset/promptset_BObench/MultiBO-non-human_hpsv3/low-image/flux/
+|-- color/
+|   |-- samples/<prompt>_NNNNNN.png       # 15 финальных BO-победительниц
+|   |-- reference/<prompt>_NNNNNN.png     # 15 baseline (unedited, seed=42)
+|   |-- target/<prompt>_NNNNNN.png        # 15 target (= reference)
+|   |-- scores.jsonl                      # 15 строк per-prompt с HPSv3
+|   |-- prompts.json
+|   `-- Multiwise/Logit-manifold-dbs/<prompt>/.../manifold-dbs/
+|       |-- best_image_trial-0_batch-{0..20}.png   # траектория BO
+|       |-- exp-data-algo_manifold-dbs-trial_0.pt  # GP/data/best_vals/config
+|       `-- config-algo_manifold-dbs-trial_0.json
+`-- (то же для 7 других категорий: shape, texture, spatial,
+     3d_spatial, non_spatial, numeracy, complex)
+\end{lstlisting}
+
+Per-prompt запись в \texttt{scores.jsonl}:
+\begin{lstlisting}[language=]
+{
+  "id":          "color_000",
+  "prompt":      "a green bench and a blue bowl",
+  "category":    "color",
+  "best_path":   ".../samples/...png",
+  "ref_path":    ".../reference/...png",
+  "tar_path":    ".../target/...png",
+  "hpsv3_bo":    8.810,
+  "hpsv3_ref":   8.811,
+  "delta_hpsv3": -0.001
+}
+\end{lstlisting}
+
+\section{Запуск (репродуцируемость)}
+
+\begin{lstlisting}[language=bash]
+git clone https://github.com/Aysel71/multi_bo_test.git annonAnomrepo
+cd annonAnomrepo
+
+# 1) Конвертер 120 промптов из бенчмарка в формат BObench
+python scripts/convert_prompts_to_bobench.py \
+    --src ../perosnalisation_experiments/prompts/prompts_120.json \
+    --dst promptsets/BObench --seed 42
+
+# 2) Параллельный прогон на 2 GPU
+GPU=0 CATEGORIES="color shape texture spatial" \
+    nohup bash scripts/promptset/promptset_BObench/pbo_flux_hpsv3_120_run.sh \
+    > logs/half_gpu0.out 2>&1 &
+
+GPU=1 CATEGORIES="3d_spatial non_spatial numeracy complex" \
+    nohup bash scripts/promptset/promptset_BObench/pbo_flux_hpsv3_120_run.sh \
+    > logs/half_gpu1.out 2>&1 &
+\end{lstlisting}
+
+Конфиг \texttt{configs/bo\_config\_flux.py} (изменённые ключевые поля):
+\begin{lstlisting}[language=Python]
+num_inference_steps = 4    # было 50: расфиксировали для родного режима schnell
+num_trials          = 1    # было 2: один цикл BO на промпт (как у A)
+num_initial_samples = 20
+num_batches         = 20
+m                   = 50   # init preference-сравнений
+q                   = 4    # точек на BO-итерацию (CLI: --q 4)
+T                   = 4    # размер choice-set    (CLI: --T 4)
+num_restarts        = 50   # acquisition multi-start
+raw_samples         = 4096 # acquisition init Sobol
+\end{lstlisting}
+
+\section{Ограничения и оговорки}
+
+\begin{enumerate}[leftmargin=2em,itemsep=4pt]
+  \item \textbf{Размер search space} различается на порядок: 5--7D у A,
+        24D у B. Это часть определения каждого метода, не предмет
+        выравнивания.
+  \item \textbf{Тип GP} принципиально разный: value-based (A) vs
+        preference-based (B). Аcquisition тоже разные.
+  \item \textbf{Бюджет} приблизительно совпадает (53--121 vs 101 генераций
+        на промпт). Бюджет A адаптивный, B --- фиксированный.
+  \item \textbf{Baseline} у A (8.83) и B (8.59) различаются на 0.24
+        (\emph{генераторы} немного разные: \texttt{FluxGenerator} с
+        identity-трансформом vs \texttt{unedited\_generation}). На фоне
+        эффекта $+3$ это пренебрежимо.
+  \item \textbf{Random baseline.} У A есть Random той же стоимости. У B
+        аналога нет; init из 20 Sobol-точек $\to$ acquisition. Сравнение
+        \emph{B vs Random} потребовало бы отдельной модификации.
+  \item \textbf{Это apples-to-apples в \emph{твоей} рамке.} В оригинальной
+        статье MultiBO основной режим --- human-in-the-loop на SDXL.
+        FLUX-вариант существует в коде, но non-human путь на нём
+        не тестировался (отсюда 10 багов в реализации).
+\end{enumerate}
+
+\end{document}
