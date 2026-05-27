@@ -94,6 +94,90 @@ baseline $= 50.8\%$ (монетка). Дополнительно: Random baselin
 Score, измеряющая соответствие text-image.
 
 % =====================================================================
+\section{Датасет: T2I-CompBench (120 промптов)}
+
+Используется подвыборка из 120 промптов из бенчмарка
+\href{https://github.com/Karine-Huang/T2I-CompBench}{\textbf{T2I-CompBench}}
+(Huang et al., NeurIPS~2023) --- стандартного бенчмарка для оценки
+\emph{compositional generation} в text-to-image моделях. Бенчмарк
+покрывает 8 типов композициональных задач, на которых известны failure
+modes современных диффузионных моделей (биндинг атрибутов к объектам,
+числительные, пространственные отношения и т.\,д.).
+
+\subsection{Структура}
+
+8 категорий по 15 промптов ($\Sigma=120$), сохранены в
+\texttt{perosnalisation\_experiments/prompts/prompts\_120.json}. Каждая
+запись:
+\begin{lstlisting}
+{
+  "id":          "color_000",
+  "prompt":      "a green bench and a blue bowl",
+  "category":    "color",
+  "source":      "T2I-CompBench/color_val.txt",
+  "source_line": 1
+}
+\end{lstlisting}
+
+\subsection{Категории и примеры}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.25}
+\footnotesize
+\begin{tabularx}{\textwidth}{l l X}
+\toprule
+Категория & Что тестирует & Примеры (из 15) \\
+\midrule
+\texttt{color}        & биндинг цвета к объекту           & ``a green bench and a blue bowl'' \newline ``a brown horse and a blue vase'' \newline ``a red car and a blue cup'' \\
+\texttt{shape}        & биндинг формы к объекту           & ``an oblong cucumber and a teardrop plum'' \newline ``a cubic ice cube and a spherical ice bucket'' \newline ``a diamond pendant and a round locket'' \\
+\texttt{texture}      & биндинг материала/текстуры        & ``a plastic toy and a glass bottle'' \newline ``rubber sole shoes and fluffy clouds'' \newline ``a metallic desk lamp and a fluffy sweater'' \\
+\texttt{spatial}      & 2D-пространственные отношения     & ``a giraffe next to a lamp'' \newline ``a girl on the top of a frog'' \newline ``a bee on the right of a refrigerator'' \\
+\texttt{3d\_spatial}  & 3D-глубина (in front, behind)     & ``a dog in front of a desk'' \newline ``a cat behind a boy'' \newline ``a chair hidden by a mouse'' \\
+\texttt{non\_spatial} & действия / атрибуты-действия      & ``A person is looking at a rainbow and marveling at its beauty.'' \newline ``The woodcarver is creating a sculpture of a bird from a block of wood.'' \newline ``A cat is lazily lounging in a sunny windowsill.'' \\
+\texttt{numeracy}     & числительные / счёт объектов      & ``two boys''; ``six airplanes''; ``five drums'' \\
+\texttt{complex}      & многосоставные сцены / атрибуты   & ``The red hat was on top of the brown coat rack.'' \newline ``The leather wallet was inside the brown purse.'' \newline ``The green plant was on the right of the white wall.'' \\
+\bottomrule
+\end{tabularx}
+\end{center}
+
+\subsection{Почему именно T2I-CompBench и почему HPSv3}
+
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item Категории бенчмарка \emph{специально подобраны} так, чтобы
+        диффузионные модели на них часто ошибались (mis-binding атрибутов,
+        путаница в spatial, неверная numeracy). Это даёт «headroom»
+        для персонализации: если базовая модель уже идеальна, оптимизировать
+        нечего.
+  \item HPSv3 --- ансамблевая модель Human Preference Score v3, обученная
+        на 1.2M+ human-rated парных сравнениях. Она чувствительна именно к
+        text-image alignment (а не только к эстетике), что делает её
+        прямой метрикой compositional fidelity.
+  \item На $n=120$ промптах при $\sigma_\Delta \approx 0.07$ Welch's
+        $t$-test различает $|\mathrm{mean}| \gtrsim 0.013$ на уровне
+        $p<0.05$. Эффекты обоих методов либо много больше этого порога
+        (метод A, $\Delta \approx +3$), либо явно меньше (метод B,
+        $\Delta = -0.0015$, $p \approx 0.81$).
+  \item Бенчмарк \emph{один и тот же} для A и B, конверт генерации тоже
+        один и тот же $\Rightarrow$ HPSv3-числа напрямую сравнимы.
+\end{itemize}
+
+\subsection{Конвертер промптов в формат метода B}
+
+Метод A читает \texttt{prompts\_120.json} напрямую. Метод B ожидает
+формат BObench: по одному JSON-файлу на категорию с полями \texttt{prompt},
+\texttt{edit\_seed}, \texttt{target\_seed}, \texttt{dataset}. Скрипт
+\texttt{scripts/convert\_prompts\_to\_bobench.py} (в составе нашего форка)
+делает преобразование с фиксированными сидами ($=42$, как у метода A) и
+протаскивает поле \texttt{id} для обратного маппинга в аггрегатор:
+
+\begin{lstlisting}[language=bash]
+python scripts/convert_prompts_to_bobench.py \
+    --src ../perosnalisation_experiments/prompts/prompts_120.json \
+    --dst promptsets/BObench --seed 42
+# -> promptsets/BObench/{color,shape,...,complex}.txt (по 15 записей)
+\end{lstlisting}
+
+% =====================================================================
 \section{Метод A: noise\_bo\_flux}
 
 \subsection{Search space}
