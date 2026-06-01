@@ -751,4 +751,204 @@ Per-prompt запись в \texttt{scores.jsonl}:
         $\to$ эффект B \emph{нулевой} в строгом смысле.
 \end{enumerate}
 
+% =====================================================================
+\section{Метод C: FABRIC (план эксперимента)}
+
+\subsection{Алгоритм}
+
+\textbf{FABRIC} (Feedback via Attention-Based Reference Image
+Conditioning)~\cite{rerich2023fabric} --- training-free метод управления
+диффузионной генерацией через визуальные \emph{примеры} (а не через
+оптимизацию в параметрическом пространстве, как у методов A и B).
+Пользователь даёт несколько positive-картинок («хочу что-то такое») и
+negative-картинок («такое не хочу»). Перед основной генерацией FABRIC
+прогоняет каждую reference-картинку через всю диффузионную траекторию и в
+каждом self-attention блоке кэширует промежуточные тензоры $K, V$. Во
+время основной генерации, в тех же блоках, эти кэшированные $K, V$
+\emph{конкатенируются} к $K, V$ текущей шумной картинки прямо перед
+softmax-attention:
+\[
+\text{Attn}(Q, K, V) \;\to\;
+\text{Attn}\bigl(Q,\; [K \,\Vert\, K_{\text{ref}^+}],\;
+                       [V \,\Vert\, V_{\text{ref}^+}]\bigr).
+\]
+Positive refs инжектятся в conditional ветку CFG (модель «тянется» к
+ним); negative refs --- в unconditional (CFG-формула затем отталкивает).
+В нашем сетапе человек заменён HPSv3-скорером: top-$3$ из батча $\to$
+positive references, bottom-$3$ $\to$ negative references, накапливание
+по раундам.
+
+\subsection{Архитектурное несоответствие с нашим сетапом}
+
+FABRIC написан под \textbf{U-Net} (SDXL) с архитектурно разделёнными
+self-attention (image~$\to$~image) и cross-attention (image~$\to$~text).
+Поэтому при инжекции ref-K/V в self-attention text-токены никогда не
+смешиваются с чужими image-features.
+
+В FLUX используется \textbf{MM-DiT} (multimodal diffusion transformer)
+с \emph{joint} attention над $[\text{text}\Vert\text{image}]$ в double
+блоках ($\sim$19~штук) и преимущественно image-stream в single блоках
+($\sim$38~штук). В joint attention text-Q и image-Q одновременно смотрят
+на конкатенированный pool $[K_{\text{text}} \Vert K_{\text{image}}]$, и
+если мы добавим ref-K, text-Q получает к ним доступ. Чтобы сохранить
+FABRIC-семантику \emph{«refs влияют только на image stream»} мы решили
+\textbf{инжектировать во все 57 блоков}, но в double-блоках накладывать
+attention-mask:
+\[
+\text{mask}[i, j] = -\infty \quad \text{при} \quad i \in \text{text-Q indices},
+\; j \in \text{ref-K indices.}
+\]
+Image-Q видят refs нормально, text-Q --- нет. Кэшируются только
+\emph{image-tokens portion} $K, V$ рефов (text-tokens рефов отбрасываются).
+
+\subsection{CFG-трюк для guidance-distilled schnell}
+
+FABRIC принципиально требует CFG (positive refs $\to$ conditional ветка,
+negative refs $\to$ unconditional ветка). FLUX.1-schnell guidance-distilled
+и работает при $c=0$ без CFG. Чтобы поднять CFG на schnell, мы используем
+\textbf{внешнюю комбинацию двух forward-проходов} (формула, предложенная
+К.~Соболевым):
+\begin{equation}
+\boxed{
+\;\text{noise\_pred} \;=\; w \cdot f(x_t, p, 1) \;-\; (w-1) \cdot f(x_t, \varnothing, 0)\;
+}
+\label{eq:cfg-trick}
+\end{equation}
+где $f(\cdot, \cdot, c)$ --- forward-проход трансформера; $p$ --- промпт;
+$\varnothing$ --- null-промпт (пустая строка); $w$ --- настраиваемый CFG-вес.
+При $w=1$ uncond выпадает и формула вырождается в стандартный schnell.
+При $w>1$ возникает «эффективный CFG» поверх дистиллированной модели.
+
+Этот трюк удваивает стоимость генерации (2 forward-прохода на каждый шаг
+вместо 1), но даёт FABRIC то самое \emph{«место для negative refs}», без
+которого половина механизма не работает.
+
+\subsection{Phase~0: эмпирическая валидация CFG-трюка на schnell}
+
+Schnell не тренировался на null-промпте --- его поведение в
+unconditional-проходе формально не определено. Поэтому перед инвестицией в
+порт attention conditioning мы проверили, переносит ли schnell внешний CFG
+без катастрофической деградации качества.
+
+\paragraph{Сетап.} 5 промптов (по одному из категорий
+\texttt{color}, \texttt{shape}, \texttt{spatial}, \texttt{numeracy},
+\texttt{complex}) $\times$ 4 значения $w \in \{1.0, 1.2, 1.5, 2.0\}$ =
+20 генераций. Каждая через формулу~\eqref{eq:cfg-trick}, без какой-либо
+FABRIC-инжекции (нулевой kV-кэш). Базовая модель ---
+\texttt{black-forest-labs/FLUX.1-schnell}, 4 шага денойзинга, seed=42,
+$1024 \times 1024$. Каждая сохранённая PNG скорится HPSv3 (тот же
+\texttt{HPSv3RewardInferencer}, что у A и B).
+
+\paragraph{Результаты.}
+\begin{center}
+\begin{tabular}{lcccc}
+\toprule
+Промпт & $w=1.0$ & $w=1.2$ & $w=1.5$ & $w=2.0$ \\
+\midrule
+\texttt{color} (a green bench and a blue bowl) & 6.07 & 5.29 & 3.99 & 0.23 \\
+\texttt{shape} (an oblong cucumber and a teardrop plum) & 5.87 & 5.02 & 4.91 & 3.09 \\
+\texttt{spatial} (a giraffe next to a lamp) & 5.84 & 5.63 & 5.39 & 4.82 \\
+\texttt{numeracy} (two boys) & 8.56 & 8.22 & 6.75 & 4.71 \\
+\texttt{complex} (the red hat\ldots) & 5.22 & 4.75 & 0.94 & $-2.05$ \\
+\midrule
+\textbf{среднее HPSv3} & \textbf{6.31} & \textbf{5.78} & \textbf{4.39} & \textbf{2.56} \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{Наблюдения.}
+\begin{itemize}[leftmargin=2em,itemsep=2pt]
+  \item HPSv3 \textbf{монотонно падает с ростом~$w$} на каждом промпте.
+        В среднем по 5 промптам: $w=1.0 \to 6.31$, $w=1.2 \to 5.78$
+        ($-8.4\%$), $w=1.5 \to 4.39$ ($-30.4\%$), $w=2.0 \to 2.56$
+        ($-59.4\%$).
+  \item \textbf{Визуально} при $w=1.0$ --- чистые schnell-генерации;
+        при $w=1.2$ --- лёгкие искажения цвета, композиция сохраняется;
+        при $w=1.5$ --- заметные артефакты, текстовое соответствие
+        страдает; при $w=2.0$ --- развал картинки (особенно \texttt{color}
+        и \texttt{complex}).
+  \item Деградация ожидаема и согласуется с гипотезой: schnell не
+        обучался на null-prompt, его unconditional прогноз --- по сути
+        шум, не имеющий смысла «классического» CFG. Внешняя комбинация
+        этого шума с conditional прогнозом ухудшает качество.
+\end{itemize}
+
+\paragraph{Решение.} Выбираем $\boxed{w = 1.2}$ для основного
+FABRIC-прогона. Обоснование:
+\begin{enumerate}[leftmargin=2em,itemsep=2pt]
+  \item Это минимальное значение $w$, дающее ненулевой uncond-вклад
+        (необходимое для negative-ref-инжекции в FABRIC).
+  \item Деградация HPSv3 в среднем $-8\%$ от plain schnell ---
+        приемлемо: ожидаем, что FABRIC compensate-ит это через
+        positive-refs-инжекцию (а если нет --- это и будет ответом про
+        FABRIC в данной постановке).
+  \item Визуальное качество при $w=1.2$ ещё сохраняется (не катастрофа,
+        как при $w=1.5+$).
+\end{enumerate}
+
+\subsection{Финальный сетап метода C}
+
+\begin{center}
+\renewcommand{\arraystretch}{1.1}
+\footnotesize
+\begin{tabular}{ll}
+\toprule
+Параметр & Значение \\
+\midrule
+Базовая модель & FLUX.1-schnell, 4 шага денойзинга, $\text{guidance}=0$ \\
+CFG-трюк & ext.\ formula (Eq.~\ref{eq:cfg-trick}), $w=1.2$ \\
+Бэкенд-attention для инжекции & все 57 блоков (38 single + 19 double) \\
+Mask в double блоках & text-Q $\times$ ref-K $= -\infty$ \\
+Кэшируем & только image-tokens K/V рефов \\
+Хранение кэша & CPU RAM + lazy GPU swap per timestep \\
+RoPE & применяется до конкатенации (вариант~а) \\
+Refs per round & top-3 (positive) + bottom-3 (negative) \\
+Аккумуляция refs & да, $\to$ 12+12 к финалу 4-го раунда \\
+Раундов фидбека & 4 \\
+Картинок на раунд & 25 \\
+Total генераций/промпт & 100 (паритет с A: 53--121, с B: 101) \\
+Auto-feedback signal & HPSv3 (тот же \texttt{HPSv3RewardInferencer}) \\
+Финальная картинка & argmax HPSv3 из round~4 \\
+Промпты & те же 120 T2I-CompBench (паритет с A и B) \\
+Сиды & baseline=42; round-$r$ image-$i$: $42\cdot 10^5 + r \cdot 100 + i$ \\
+GPU & 2$\times$NVIDIA H100 80GB \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Phase plan (status)}
+
+\begin{center}
+\begin{tabular}{clll}
+\toprule
+\# & Phase & Содержание & Статус \\
+\midrule
+0 & CFG-validation     & 5~prompts $\times$ 4~$w$ values, HPSv3 grid  & \textbf{done}, выбрано $w=1.2$ \\
+1 & KV-cache + injector & все 57 блоков, mask для double, image-only K/V & in progress \\
+2 & Pipeline + loop    & \texttt{FluxFabricPipeline} + HPSv3 ranker      & --- \\
+3 & 120-prompt run     & параллельно на 2$\times$H100                    & --- \\
+4 & Aggregator + LaTeX & финальная таблица A vs B vs C                   & --- \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\subsection{Ожидаемый формат вывода}
+
+По завершении (Phase~3) для каждого промпта в
+\texttt{outputs/fabric/<category>/scores.jsonl}:
+\begin{lstlisting}[language=]
+{
+  "id":          "color_000",
+  "prompt":      "a green bench and a blue bowl",
+  "category":    "color",
+  "best_path":   ".../samples/...png",
+  "ref_path":    ".../reference/...png",
+  "hpsv3_bo":    <argmax HPSv3 round 4>,
+  "hpsv3_ref":   <unedited schnell baseline at seed 42>,
+  "delta_hpsv3": <hpsv3_bo - hpsv3_ref>
+}
+\end{lstlisting}
+В точности тот же формат, что у методов A и B, $\Rightarrow$ аггрегатор
+встраивает третью строку в финальную таблицу без модификации.
+
 \end{document}
